@@ -1,6 +1,6 @@
 {
   "name": "opencode-feeds",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "RSS and Atom subscriptions for OpenCode sessions",
   "license": "GPL-3.0-or-later",
   "private": true,
