@@ -36,10 +36,13 @@ watch release feeds, security advisories or anything else that publishes a feed.
 The plugin is a single TypeScript file with no dependencies. It uses the OpenCode 2.x plugin API and has been tested
 with OpenCode 2.3.0.
 
-Clone the repository and add its absolute path to the `plugins` array of your OpenCode config:
+Unpack a [release](https://github.com/Qjammer/opencode-feeds/releases) (or clone the repository) and add its absolute
+path to the `plugins` array of your OpenCode config:
 
 ```bash
-git clone https://github.com/Qjammer/opencode-feeds.git ~/opencode-feeds
+mkdir ~/opencode-feeds
+curl -fsSL https://github.com/Qjammer/opencode-feeds/releases/download/v<version>/opencode-feeds-<version>.tgz \
+  | tar -xz --strip-components=1 -C ~/opencode-feeds
 ```
 
 ```jsonc
@@ -56,6 +59,12 @@ npm test
 
 The tests run the plugin against a mock OpenCode context and need Node.js 22.18 or later, which runs TypeScript
 directly.
+
+## Releases
+
+CI (`.github/workflows/ci.yml`) runs the tests and packs the plugin (`npm pack`) on every push and pull request.
+Pushing a tag `v<version>` that matches the `version` in `package.json` creates a GitHub release with that package,
+once the tests pass. To release, bump `version` in `package.json` on `main`, then tag that commit and push the tag.
 
 ## License
 

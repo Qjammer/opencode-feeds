@@ -6,6 +6,9 @@
   "private": true,
   "type": "module",
   "main": "./index.ts",
+  "files": [
+    "index.ts"
+  ],
   "engines": {
     "node": ">=22.18"
   },
