@@ -1,14 +1,17 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
 // RSS and Atom subscriptions for sessions: `feed_subscribe`, `feed_list`, `feed_unsubscribe`. Each feed is polled on
 // its own interval; new items are delivered to the subscribed session as one synthetic message that wakes it up.
 // Subscribing marks the feed's current items as seen, so only items published after that are delivered.
 // A subscription may filter items by title with `include` and `exclude` regular expressions; filtered-out items are
 // marked as seen without being delivered.
+// Local feed files (file URLs or absolute paths) are read again only when their modification time changes.
 // Subscriptions are kept in plugin storage and survive restarts. Each delivery has a deterministic message ID, so
 // delivering the same new items twice is a no-op.
-//
-// SPDX-License-Identifier: GPL-3.0-or-later
 // Plain object rather than `Plugin.define`, which only returns its argument: no runtime dependency needed.
 import { createHash, randomBytes } from "node:crypto"
+import { readFile, stat } from "node:fs/promises"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 const TICK_MS = 60_000
 const FETCH_TIMEOUT_MS = 20_000
@@ -185,8 +188,17 @@ async function sessionExists(ctx: any, sessionID: string) {
   }
 }
 
+/** Reads a local feed; `undefined` when the file has not been modified since the last read. */
+async function readFeed(feed: Pick<Feed, "url" | "modified">) {
+  const path = fileURLToPath(feed.url)
+  const modified = (await stat(path)).mtime.toISOString()
+  if (modified === feed.modified) return undefined
+  return { ...parseFeed(await readFile(path, "utf8")), etag: undefined, modified }
+}
+
 /** Fetches a feed; `undefined` when the server says it has not changed since the last fetch. */
 async function fetchFeed(feed: Pick<Feed, "url" | "etag" | "modified">) {
+  if (/^file:/i.test(feed.url)) return readFeed(feed)
   const headers: Record<string, string> = {
     "user-agent": "opencode-feeds/1",
     accept: "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.5",
@@ -315,7 +327,7 @@ export default {
         input: {
           type: "object",
           properties: {
-            url: { type: "string", description: "The feed's URL (http or https)." },
+            url: { type: "string", description: "The feed's URL (http, https or file), or the absolute path of a local feed file." },
             every: { type: "string", description: `How often to check, e.g. "15m", "2h", "1d". Default: ${DEFAULT_EVERY}.` },
             title: { type: "string", description: "The subscription's title, shown with each delivery." },
             include: { type: "string", description: "Only deliver items whose title matches this regular expression (case-insensitive)." },
@@ -326,8 +338,9 @@ export default {
         },
         options: { codemode: false },
         async execute(input: any, context: any) {
-          const url = String(input.url ?? "").trim()
-          if (!/^https?:\/\//i.test(url)) throw new Error("`url` must be an http or https URL.")
+          let url = String(input.url ?? "").trim()
+          if (url.startsWith("/")) url = pathToFileURL(url).href
+          if (!/^(https?|file):\/\//i.test(url)) throw new Error("`url` must be an http, https or file URL, or an absolute path.")
           const every = (input.every ?? DEFAULT_EVERY).trim()
           const interval = parseEvery(every)
           const include = input.include?.trim() || undefined

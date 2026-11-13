@@ -1,4 +1,8 @@
 import assert from "node:assert/strict"
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import plugin, { parseEvery, parseFeed, wanted } from "./index.ts"
 
 // Parsing
@@ -72,6 +76,7 @@ assert.equal(sub.feedTitle, "Example & Co")
 assert.equal(sub.items, 2)
 await assert.rejects(call("feed_subscribe", { url: "https://example.com/feed" }), /already subscribed/)
 await assert.rejects(call("feed_subscribe", { url: "ftp://x" }))
+await assert.rejects(call("feed_subscribe", { url: "relative/feed.xml" }))
 await assert.rejects(call("feed_subscribe", { url: "https://example.com/feed", every: "1m" }, "ses_ok2"))
 await assert.rejects(call("feed_subscribe", { url: "https://example.com/feed", exclude: "(" }, "ses_ok2"), /Invalid `exclude` pattern/)
 const other = await call("feed_subscribe", { url: "https://example.com/feed" }, "ses_ok2") // another session may subscribe too
@@ -124,6 +129,29 @@ body = body + " "
 await due()
 assert.equal(synthetic.length, 3)
 await call("feed_unsubscribe", { id: filtered.id })
+
+// Local files: read again only when the modification time changes.
+const dir = await mkdtemp(join(tmpdir(), "opencode-feeds-"))
+const path = join(dir, "feed.xml")
+await writeFile(path, rss)
+const local = await call("feed_subscribe", { url: path }, "ses_ok4")
+assert.equal(local.url, pathToFileURL(path).href)
+assert.equal(local.items, 2)
+await due()
+assert.equal(synthetic.length, 3)
+await writeFile(path, rss.replace("<item>", `<item><title>Local 1.0</title><guid>l10</guid></item><item>`))
+const later = new Date(Date.now() + 60_000)
+await utimes(path, later, later)
+await due()
+const forLocal = synthetic.filter((input) => input.sessionID === "ses_ok4")
+assert.equal(forLocal.length, 1)
+assert.ok(forLocal[0].text.includes("Local 1.0"))
+await due()
+assert.equal(synthetic.length, 4)
+await rm(dir, { recursive: true })
+await due()
+assert.match((await call("feed_list", {}, "ses_ok4"))[0].error, /ENOENT/)
+await call("feed_unsubscribe", { id: local.id })
 
 // Fetch error is recorded and cleared by a later success.
 const okFetch = globalThis.fetch
