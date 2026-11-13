@@ -244,6 +244,48 @@ assert.ok(forCategory[0].text.includes("categories: comment, others"))
 const preview = await call("feed_subscribe", { url: "https://example.com/feed", categories: [["commit"]] }, "ses_ok7")
 assert.deepEqual(preview.latest, [{ title: "Commit C", categories: ["commit", "own"] }])
 await call("feed_unsubscribe", { id: preview.id })
+
+// Updating: new settings apply from the next check, and items already seen stay seen, even those filtered out.
+const changed = await call("feed_update", { id: byCategory.id, categories: [["check"]], title: "Checks", every: "1h" })
+assert.deepEqual(changed.categories, [["check"]])
+assert.equal(changed.title, "Checks")
+assert.equal(changed.every, "1h")
+body = body + " "
+await due()
+assert.equal(synthetic.filter((input) => input.sessionID === "ses_ok6").length, 1) // not Check D
+body = body.replace("<item>", `<item><title>Check E</title><guid>ce</guid><category>check</category></item><item>`)
+await due()
+const afterUpdate = synthetic.filter((input) => input.sessionID === "ses_ok6")
+assert.equal(afterUpdate.length, 2)
+assert.ok(afterUpdate[1].text.includes("1 new item in") && afterUpdate[1].text.includes("Check E"))
+assert.ok(afterUpdate[1].text.includes("Subscription title: Checks"))
+const cleared = await call("feed_update", { id: byCategory.id, categories: [], title: "" })
+assert.equal(cleared.categories, undefined)
+assert.equal(cleared.title, undefined)
+await assert.rejects(call("feed_update", { id: byCategory.id, include: "(" }), /Invalid `include` pattern/)
+await assert.rejects(call("feed_update", { id: byCategory.id, every: "1m" }), /at least/)
+assert.equal((await call("feed_list", {}, "ses_ok6"))[0].every, "1h")
+await assert.rejects(call("feed_update", { id: "feed_nope" }), /No feed subscription/)
+
+// A poll keeps changes made while it fetches, and doesn't bring back a subscription removed meanwhile.
+const removed = await call("feed_subscribe", { url: "https://example.com/feed" }, "ses_ok8")
+let release!: () => void
+const gate = new Promise<void>((resolve) => (release = resolve))
+globalThis.fetch = (async (url: string, init: any) => {
+  await gate
+  return okFetch(url, init)
+}) as any
+for (const [key, value] of store) store.set(key, { ...(value as any), next: Date.now() - 1000 })
+dispose2()
+dispose2 = await plugin.setup(ctx)
+await new Promise((resolve) => setTimeout(resolve, 20))
+await call("feed_update", { id: byCategory.id, title: "During" })
+await call("feed_unsubscribe", { id: removed.id })
+release()
+await new Promise((resolve) => setTimeout(resolve, 50))
+globalThis.fetch = okFetch
+assert.equal(store.has(`feed:${removed.id}`), false)
+assert.equal((await call("feed_list", {}, "ses_ok6"))[0].title, "During")
 await call("feed_unsubscribe", { id: byCategory.id })
 
 await call("feed_unsubscribe", { id: sub.id })

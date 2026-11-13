@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// RSS and Atom subscriptions for sessions: `feed_subscribe`, `feed_list`, `feed_unsubscribe`. Each feed is polled on
-// its own interval; new items are delivered to the subscribed session as one synthetic message that wakes it up.
-// Subscribing marks the feed's current items as seen, so only items published after that are delivered.
+// RSS and Atom subscriptions for sessions: `feed_subscribe`, `feed_list`, `feed_update`, `feed_unsubscribe`. Each
+// feed is polled on its own interval; new items are delivered to the subscribed session as one synthetic message that
+// wakes it up. Subscribing marks the feed's current items as seen, so only items published after that are delivered.
+// Updating a subscription keeps its seen items. A poll writes only its own fields over the stored subscription, so
+// changes made during the fetch are kept, and a subscription removed during it stays removed.
 // A subscription may filter items by title with `include` and `exclude` regular expressions, and by category with
 // `categories`, a disjunction of conjunctions of category terms; filtered-out items are marked as seen without being
 // delivered.
@@ -317,6 +319,15 @@ function remember(current: Item[], seen: string[]) {
   return [...keys, ...extra]
 }
 
+/** Stores a poll's changes over the subscription as it is now, which may have been updated or removed during the poll. */
+async function save(ctx: any, id: string, changes: Partial<Feed>, now: number) {
+  const current = (await ctx.storage.get(key(id))) as Feed | undefined
+  if (!current) return
+  const updated: Feed = { ...current, ...changes, next: now + parseEvery(current.every) }
+  if (!changes.error) delete updated.error
+  await ctx.storage.set(key(id), updated)
+}
+
 async function poll(ctx: any, feed: Feed, now: number) {
   let result: Awaited<ReturnType<typeof fetchFeed>>
   try {
@@ -324,16 +335,16 @@ async function poll(ctx: any, feed: Feed, now: number) {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     console.error("[feeds] fetch failed", feed.id, feed.url, reason)
-    await ctx.storage.set(key(feed.id), { ...feed, error: reason, next: now + parseEvery(feed.every) })
+    await save(ctx, feed.id, { error: reason }, now)
     return
   }
-  const updated: Feed = { ...feed, next: now + parseEvery(feed.every) }
-  delete updated.error
+  const changes: Partial<Feed> = {}
   if (result) {
     const seen = new Set(feed.seen)
     // Feeds list newest first; deliver oldest first.
     const fresh = result.items.filter((item) => !seen.has(item.key) && wanted(feed, item)).reverse()
-    if (result.title) updated.feedTitle = result.title
+    if (result.title) changes.feedTitle = result.title
+    const updated: Feed = { ...feed, ...changes }
     if (fresh.length) {
       try {
         await ctx.session.synthetic({
@@ -355,11 +366,11 @@ async function poll(ctx: any, feed: Feed, now: number) {
         return
       }
     }
-    updated.seen = remember(result.items, feed.seen)
-    updated.etag = result.etag
-    updated.modified = result.modified
+    changes.seen = remember(result.items, feed.seen)
+    changes.etag = result.etag
+    changes.modified = result.modified
   }
-  await ctx.storage.set(key(feed.id), updated)
+  await save(ctx, feed.id, changes, now)
 }
 
 async function tick() {
@@ -380,6 +391,19 @@ async function tick() {
 
 const json = (value: unknown) => ({ content: JSON.stringify(value, null, 2) })
 
+/** The input properties shared by `feed_subscribe` and `feed_update`. */
+const SETTINGS = {
+  every: { type: "string", description: `How often to check, e.g. "15m", "2h", "1d". Default: ${DEFAULT_EVERY}.` },
+  title: { type: "string", description: "The subscription's title, shown with each delivery." },
+  include: { type: "string", description: "Only deliver items whose title matches this regular expression (case-insensitive)." },
+  exclude: { type: "string", description: "Don't deliver items whose title matches this regular expression (case-insensitive)." },
+  categories: {
+    type: "array",
+    items: { type: "array", items: { type: "string" } },
+    description: "Only deliver items that match at least one clause. An item matches a clause when it has all of the clause's terms, and none of its terms written with a leading `!`. Terms are exact and case-sensitive.",
+  },
+}
+
 export default {
   id: "feeds",
   async setup(ctx: any) {
@@ -392,15 +416,7 @@ export default {
           type: "object",
           properties: {
             url: { type: "string", description: "The feed's URL (http, https or file), or the path of a local feed file: absolute or under ~/ (the server's home). A missing file is an empty feed until it is created." },
-            every: { type: "string", description: `How often to check, e.g. "15m", "2h", "1d". Default: ${DEFAULT_EVERY}.` },
-            title: { type: "string", description: "The subscription's title, shown with each delivery." },
-            include: { type: "string", description: "Only deliver items whose title matches this regular expression (case-insensitive)." },
-            exclude: { type: "string", description: "Don't deliver items whose title matches this regular expression (case-insensitive)." },
-            categories: {
-              type: "array",
-              items: { type: "array", items: { type: "string" } },
-              description: "Only deliver items that match at least one clause. An item matches a clause when it has all of the clause's terms, and none of its terms written with a leading `!`. Terms are exact and case-sensitive.",
-            },
+            ...SETTINGS,
           },
           required: ["url"],
           additionalProperties: false,
@@ -471,6 +487,38 @@ export default {
             .filter((feed) => input.all || feed.sessionID === context.sessionID)
             .sort((a, b) => a.created - b.created)
           return json(feeds.map(describe))
+        },
+      })
+      editor.add({
+        name: "feed_update",
+        description:
+          "Change a feed subscription's `every`, `title`, `include`, `exclude` or `categories` (see feed_subscribe), keeping track of the items already seen, so none are skipped or delivered twice. Omitted fields are unchanged; an empty `title`, `include` or `exclude`, or an empty `categories` list, removes it. The changes apply from the next check, which a new `every` reschedules to one interval from now.",
+        input: {
+          type: "object",
+          properties: { id: { type: "string", description: "The subscription's ID (feed_...)." }, ...SETTINGS },
+          required: ["id"],
+          additionalProperties: false,
+        },
+        options: { codemode: false },
+        async execute(input: any) {
+          const feed = (await ctx.storage.get(key(input.id))) as Feed | undefined
+          if (!feed) throw new Error(`No feed subscription ${input.id}.`)
+          const updated: Feed = { ...feed }
+          if (input.every !== undefined) {
+            updated.every = input.every.trim()
+            updated.next = Date.now() + parseEvery(updated.every)
+          }
+          if (input.title !== undefined) updated.title = input.title.trim() || undefined
+          if (input.include !== undefined) updated.include = input.include.trim() || undefined
+          if (input.exclude !== undefined) updated.exclude = input.exclude.trim() || undefined
+          if (input.categories !== undefined) updated.categories = parseCategories(input.categories)
+          if (updated.include) parsePattern("include", updated.include)
+          if (updated.exclude) parsePattern("exclude", updated.exclude)
+          for (const field of ["title", "include", "exclude", "categories"] as const) {
+            if (updated[field] === undefined) delete updated[field]
+          }
+          await ctx.storage.set(key(feed.id), updated)
+          return json(describe(updated))
         },
       })
       editor.add({

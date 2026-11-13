@@ -10,6 +10,7 @@ watch release feeds, security advisories or anything else that publishes a feed.
 | ---- | ------------ |
 | `feed_subscribe` | Subscribes the current session to a feed: `url` (http, https or file URL, or the path of a local file: absolute or under `~/`), `every` (default `30m`, at least `5m`; e.g. `15m`, `2h`, `1d`), optional `title` shown with each delivery, and optional `include` / `exclude` and `categories` filters |
 | `feed_list` | Lists the session's subscriptions (or every session's, with `all`), with the next check and the last fetch error, if any |
+| `feed_update` | Changes a subscription's `every`, `title`, `include`, `exclude` or `categories` by its ID, keeping its seen items. Omitted fields are unchanged; an empty `title`, `include` or `exclude`, or an empty `categories` list, removes it |
 | `feed_unsubscribe` | Removes a subscription by its ID (`feed_...`) |
 
 - Subscribing marks the feed's current items as seen, so only items published afterwards are delivered.
