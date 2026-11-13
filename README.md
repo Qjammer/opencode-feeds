@@ -8,7 +8,7 @@ watch release feeds, security advisories or anything else that publishes a feed.
 
 | Tool | What it does |
 | ---- | ------------ |
-| `feed_subscribe` | Subscribes the current session to a feed: `url` (http, https or file URL, or the absolute path of a local file), `every` (default `30m`, at least `5m`; e.g. `15m`, `2h`, `1d`), optional `title` shown with each delivery, and optional `include` / `exclude` filters |
+| `feed_subscribe` | Subscribes the current session to a feed: `url` (http, https or file URL, or the path of a local file: absolute or under `~/`), `every` (default `30m`, at least `5m`; e.g. `15m`, `2h`, `1d`), optional `title` shown with each delivery, and optional `include` / `exclude` filters |
 | `feed_list` | Lists the session's subscriptions (or every session's, with `all`), with the next check and the last fetch error, if any |
 | `feed_unsubscribe` | Removes a subscription by its ID (`feed_...`) |
 
@@ -18,7 +18,8 @@ watch release feeds, security advisories or anything else that publishes a feed.
 - Feeds are fetched with conditional requests (`ETag`, `Last-Modified`). A failed fetch is recorded and shown by
   `feed_list` until a later fetch succeeds.
 - Local feed files are read with the OpenCode server's permissions, and read again only when their modification time
-  changes.
+  changes. `~/` is the server's home directory. A missing file is an empty feed: subscribing before the file exists
+  delivers all its items once it is created.
 - Subscriptions are kept in plugin storage and survive restarts. A session's subscriptions are removed when the
   session is deleted.
 - Deliveries have deterministic message IDs, so delivering the same items twice is a no-op.

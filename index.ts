@@ -5,12 +5,15 @@
 // Subscribing marks the feed's current items as seen, so only items published after that are delivered.
 // A subscription may filter items by title with `include` and `exclude` regular expressions; filtered-out items are
 // marked as seen without being delivered.
-// Local feed files (file URLs or absolute paths) are read again only when their modification time changes.
+// Local feed files (file URLs, absolute paths or paths under ~/) are read again only when their modification time
+// changes. A missing file is an empty feed, so a feed subscribed to before its file exists delivers everything in it.
 // Subscriptions are kept in plugin storage and survive restarts. Each delivery has a deterministic message ID, so
 // delivering the same new items twice is a no-op.
 // Plain object rather than `Plugin.define`, which only returns its argument: no runtime dependency needed.
 import { createHash, randomBytes } from "node:crypto"
 import { readFile, stat } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const TICK_MS = 60_000
@@ -188,10 +191,16 @@ async function sessionExists(ctx: any, sessionID: string) {
   }
 }
 
-/** Reads a local feed; `undefined` when the file has not been modified since the last read. */
+/** Reads a local feed; `undefined` when the file has not been modified since the last read. A missing file is an empty feed. */
 async function readFeed(feed: Pick<Feed, "url" | "modified">) {
   const path = fileURLToPath(feed.url)
-  const modified = (await stat(path)).mtime.toISOString()
+  let modified: string
+  try {
+    modified = (await stat(path)).mtime.toISOString()
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error
+    return { title: undefined, items: [] as Item[], etag: undefined, modified: undefined }
+  }
   if (modified === feed.modified) return undefined
   return { ...parseFeed(await readFile(path, "utf8")), etag: undefined, modified }
 }
@@ -327,7 +336,7 @@ export default {
         input: {
           type: "object",
           properties: {
-            url: { type: "string", description: "The feed's URL (http, https or file), or the absolute path of a local feed file." },
+            url: { type: "string", description: "The feed's URL (http, https or file), or the path of a local feed file: absolute or under ~/ (the server's home). A missing file is an empty feed until it is created." },
             every: { type: "string", description: `How often to check, e.g. "15m", "2h", "1d". Default: ${DEFAULT_EVERY}.` },
             title: { type: "string", description: "The subscription's title, shown with each delivery." },
             include: { type: "string", description: "Only deliver items whose title matches this regular expression (case-insensitive)." },
@@ -339,8 +348,9 @@ export default {
         options: { codemode: false },
         async execute(input: any, context: any) {
           let url = String(input.url ?? "").trim()
+          if (url.startsWith("~/")) url = join(homedir(), url.slice(2))
           if (url.startsWith("/")) url = pathToFileURL(url).href
-          if (!/^(https?|file):\/\//i.test(url)) throw new Error("`url` must be an http, https or file URL, or an absolute path.")
+          if (!/^(https?|file):\/\//i.test(url)) throw new Error("`url` must be an http, https or file URL, an absolute path or a path under ~/.")
           const every = (input.every ?? DEFAULT_EVERY).trim()
           const interval = parseEvery(every)
           const include = input.include?.trim() || undefined

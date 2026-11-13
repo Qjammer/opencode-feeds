@@ -148,10 +148,34 @@ assert.equal(forLocal.length, 1)
 assert.ok(forLocal[0].text.includes("Local 1.0"))
 await due()
 assert.equal(synthetic.length, 4)
-await rm(dir, { recursive: true })
+
+// A missing file is an empty feed: no error, and everything in it is new once it is created.
+await rm(path)
 await due()
-assert.match((await call("feed_list", {}, "ses_ok4"))[0].error, /ENOENT/)
+assert.equal((await call("feed_list", {}, "ses_ok4"))[0].error, undefined)
+assert.equal(synthetic.length, 4)
+await writeFile(path, rss.replace("<item>", `<item><title>Local 2.0</title><guid>l20</guid></item><item>`))
+await due()
+assert.equal(synthetic.length, 5)
+assert.ok(synthetic[4].text.includes("1 new item in") && synthetic[4].text.includes("Local 2.0"))
 await call("feed_unsubscribe", { id: local.id })
+
+// Subscribing to a file that doesn't exist yet, by a path under ~/.
+const home = process.env.HOME
+process.env.HOME = dir
+const pending = await call("feed_subscribe", { url: "~/later.xml" }, "ses_ok5")
+process.env.HOME = home
+assert.equal(pending.url, pathToFileURL(join(dir, "later.xml")).href)
+assert.equal(pending.items, 0)
+await due()
+assert.equal(synthetic.length, 5)
+await writeFile(join(dir, "later.xml"), rss)
+await due()
+const forPending = synthetic.filter((input) => input.sessionID === "ses_ok5")
+assert.equal(forPending.length, 1)
+assert.ok(forPending[0].text.includes("2 new items in"))
+await call("feed_unsubscribe", { id: pending.id })
+await rm(dir, { recursive: true })
 
 // Fetch error is recorded and cleared by a later success.
 const okFetch = globalThis.fetch
