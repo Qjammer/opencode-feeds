@@ -3,7 +3,7 @@ import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import plugin, { parseEvery, parseFeed, wanted } from "./index.ts"
+import plugin, { parseCategories, parseEvery, parseFeed, wanted } from "./index.ts"
 
 // Parsing
 const rss = `<?xml version="1.0"?><rss version="2.0"><channel><title>Example &amp; Co</title><link>https://example.com</link>
@@ -13,7 +13,7 @@ const rss = `<?xml version="1.0"?><rss version="2.0"><channel><title>Example &am
 const parsed = parseFeed(rss)
 assert.equal(parsed.title, "Example & Co")
 assert.equal(parsed.items.length, 2)
-assert.deepEqual(parsed.items[0], { key: "r12", title: "Release 1.2 <beta>", link: "https://example.com/1.2", date: "Fri, 23 Oct 2026 10:00:00 GMT", summary: "Fixes & things" })
+assert.deepEqual(parsed.items[0], { key: "r12", title: "Release 1.2 <beta>", link: "https://example.com/1.2", date: "Fri, 23 Oct 2026 10:00:00 GMT", summary: "Fixes & things", categories: [] })
 assert.equal(parsed.items[1].key, "https://example.com/1.1")
 
 const atom = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title type="text">Atom feed</title>
@@ -22,7 +22,7 @@ const atom = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><ti
 <updated>2026-10-23T10:00:00Z</updated><content type="html">&lt;h1&gt;Breaking&lt;/h1&gt;</content></entry></feed>`
 const parsedAtom = parseFeed(atom)
 assert.equal(parsedAtom.title, "Atom feed")
-assert.deepEqual(parsedAtom.items[0], { key: "tag:example.com,2026:1", title: "v2.0.0", link: "https://example.com/v2", date: "2026-10-23T10:00:00Z", summary: "Breaking" })
+assert.deepEqual(parsedAtom.items[0], { key: "tag:example.com,2026:1", title: "v2.0.0", link: "https://example.com/v2", date: "2026-10-23T10:00:00Z", summary: "Breaking", categories: [] })
 assert.throws(() => parseFeed("<html><body>nope</body></html>"))
 
 // Atom text content keeps its < and >; HTML content is stripped of tags.
@@ -33,15 +33,41 @@ assert.equal(parseFeed(atomText("")).items[0].summary, "Returns Array<string>, s
 assert.equal(parseFeed(atomText(' type="html"')).items[0].summary, "Returns Array , see")
 assert.equal(parseFeed(atomText("").replace(/content/g, "summary")).items[0].summary, "Returns Array<string>, see <https://example.com/x>")
 
+// Categories: Atom terms (self-closing or not), RSS texts.
+const atomCategories = `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>1</id><title>t</title>
+<category term="type:comment"/><category term="own" label="Own"></category><category scheme="x" term=" entity:epic "/></entry></feed>`
+assert.deepEqual(parseFeed(atomCategories).items[0].categories, ["type:comment", "own", "entity:epic"])
+const rssCategories = `<rss><channel><category>channel-wide</category><item><title>t</title><category>Go</category>
+<category domain="x"><![CDATA[a & b]]></category></item></channel></rss>`
+assert.deepEqual(parseFeed(rssCategories).items[0].categories, ["Go", "a & b"])
+
 assert.equal(parseEvery("30m"), 30 * 60_000)
 assert.equal(parseEvery("1d2h"), 26 * 3600_000)
 assert.throws(() => parseEvery("1m"))
 assert.throws(() => parseEvery("soon"))
 
-assert.equal(wanted({}, { key: "a", title: "v1.0-beta" }), true)
-assert.equal(wanted({ include: "^v1\\." }, { key: "a", title: "V1.0" }), true)
-assert.equal(wanted({ include: "^v1\\." }, { key: "a", title: "v2.0" }), false)
-assert.equal(wanted({ exclude: "beta|rc" }, { key: "a", title: "v1.0-BETA" }), false)
+assert.equal(wanted({}, { key: "a", title: "v1.0-beta", categories: [] }), true)
+assert.equal(wanted({ include: "^v1\\." }, { key: "a", title: "V1.0", categories: [] }), true)
+assert.equal(wanted({ include: "^v1\\." }, { key: "a", title: "v2.0", categories: [] }), false)
+assert.equal(wanted({ exclude: "beta|rc" }, { key: "a", title: "v1.0-BETA", categories: [] }), false)
+const epic = { key: "a", title: "New epic", categories: ["type:created", "entity:epic", "own"] }
+assert.equal(wanted({ categories: [["type:created", "entity:epic"]] }, epic), true)
+assert.equal(wanted({ categories: [["type:created", "entity:issue"]] }, epic), false)
+assert.equal(wanted({ categories: [["type:created", "entity:issue"], ["entity:epic"]] }, epic), true)
+assert.equal(wanted({ categories: [["Entity:epic"]] }, epic), false)
+assert.equal(wanted({ categories: [["type:created"]] }, { key: "a", title: "t", categories: [] }), false)
+assert.equal(wanted({ categories: [["!own"]] }, epic), false)
+assert.equal(wanted({ categories: [["!others"]] }, epic), true)
+assert.equal(wanted({ categories: [["!own"]] }, { key: "a", title: "t", categories: [] }), true)
+assert.equal(wanted({ categories: [["entity:epic", "!own"], ["type:created"]] }, epic), true)
+assert.equal(wanted({ include: "^new", categories: [["entity:epic", "!others"]] }, epic), true)
+assert.equal(wanted({ include: "^old", categories: [["entity:epic"]] }, epic), false)
+assert.deepEqual(parseCategories([[" a ", "! b"], ["c"]]), [["a", "!b"], ["c"]])
+assert.equal(parseCategories([]), undefined)
+assert.throws(() => parseCategories(["a"]), /list of clauses/)
+assert.throws(() => parseCategories([[]]), /Empty clause or term/)
+assert.throws(() => parseCategories([["a", " "]]), /Empty clause or term/)
+assert.throws(() => parseCategories([["!"]]), /Empty clause or term/)
 
 // Plugin, with a mock context and fetch
 let body = rss
@@ -198,6 +224,27 @@ assert.equal((await call("feed_list", {}))[0].error, undefined)
 store.set("feed:feed_orphan", { ...(store.get(`feed:${sub.id}`) as any), id: "feed_orphan", sessionID: "ses_gone", seen: [], etag: undefined })
 await due()
 assert.equal(store.has("feed:feed_orphan"), false)
+
+// Category filter: items matching any clause are delivered and show their categories.
+const byCategory = await call("feed_subscribe", { url: "https://example.com/feed", categories: [["comment", "!own"], ["commit"]] }, "ses_ok6")
+assert.deepEqual(byCategory.categories, [["comment", "!own"], ["commit"]])
+assert.deepEqual((await call("feed_list", {}, "ses_ok6"))[0].categories, [["comment", "!own"], ["commit"]])
+await assert.rejects(call("feed_subscribe", { url: "https://example.com/other", categories: ["own"] }, "ses_ok6"), /list of clauses/)
+body = body.replace("<item>", `<item><title>Comment A</title><guid>ca</guid><category>comment</category><category>others</category></item>
+<item><title>Comment B</title><guid>cb</guid><category>comment</category><category>own</category></item>
+<item><title>Commit C</title><guid>cc</guid><category>commit</category><category>own</category></item>
+<item><title>Check D</title><guid>cd</guid><category>check</category></item><item>`)
+await due()
+const forCategory = synthetic.filter((input) => input.sessionID === "ses_ok6")
+assert.equal(forCategory.length, 1)
+assert.ok(forCategory[0].text.includes("2 new items in"))
+assert.ok(forCategory[0].text.includes("Comment A") && forCategory[0].text.includes("Commit C"))
+assert.ok(!forCategory[0].text.includes("Comment B") && !forCategory[0].text.includes("Check D"))
+assert.ok(forCategory[0].text.includes("categories: comment, others"))
+const preview = await call("feed_subscribe", { url: "https://example.com/feed", categories: [["commit"]] }, "ses_ok7")
+assert.deepEqual(preview.latest, [{ title: "Commit C", categories: ["commit", "own"] }])
+await call("feed_unsubscribe", { id: preview.id })
+await call("feed_unsubscribe", { id: byCategory.id })
 
 await call("feed_unsubscribe", { id: sub.id })
 assert.equal(store.size, 0)
