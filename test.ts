@@ -25,6 +25,14 @@ assert.equal(parsedAtom.title, "Atom feed")
 assert.deepEqual(parsedAtom.items[0], { key: "tag:example.com,2026:1", title: "v2.0.0", link: "https://example.com/v2", date: "2026-10-23T10:00:00Z", summary: "Breaking" })
 assert.throws(() => parseFeed("<html><body>nope</body></html>"))
 
+// Atom text content keeps its < and >; HTML content is stripped of tags.
+const atomText = (attributes: string) => `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>1</id><title>t</title>
+<content${attributes}>Returns Array&lt;string&gt;,  see &lt;https://example.com/x&gt;</content></entry></feed>`
+assert.equal(parseFeed(atomText(' type="text"')).items[0].summary, "Returns Array<string>, see <https://example.com/x>")
+assert.equal(parseFeed(atomText("")).items[0].summary, "Returns Array<string>, see <https://example.com/x>")
+assert.equal(parseFeed(atomText(' type="html"')).items[0].summary, "Returns Array , see")
+assert.equal(parseFeed(atomText("").replace(/content/g, "summary")).items[0].summary, "Returns Array<string>, see <https://example.com/x>")
+
 assert.equal(parseEvery("30m"), 30 * 60_000)
 assert.equal(parseEvery("1d2h"), 26 * 3600_000)
 assert.throws(() => parseEvery("1m"))

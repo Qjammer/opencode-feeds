@@ -77,21 +77,39 @@ function text(raw: string | undefined) {
   return entities(value).trim()
 }
 
-/** Plain text from HTML content, for summaries. */
+/** A summary from plain text: whitespace collapsed, shortened to SUMMARY_CHARS. */
+function summarize(value: string | undefined) {
+  const collapsed = value?.replace(/\s+/g, " ").trim()
+  if (!collapsed) return undefined
+  return collapsed.length > SUMMARY_CHARS ? `${collapsed.slice(0, SUMMARY_CHARS).trimEnd()}…` : collapsed
+}
+
+/** A summary from HTML content. */
 function plain(html: string | undefined) {
-  if (!html) return undefined
-  const stripped = entities(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim()
-  if (!stripped) return undefined
-  return stripped.length > SUMMARY_CHARS ? `${stripped.slice(0, SUMMARY_CHARS).trimEnd()}…` : stripped
+  return summarize(html && entities(html.replace(/<[^>]*>/g, " ")))
+}
+
+/** The first element with one of these names (any namespace prefix): its name, opening tag and content. */
+function find(xml: string, ...names: string[]) {
+  for (const name of names) {
+    const match = new RegExp(`(<(?:[\\w-]+:)?${name}(?:\\s[^>]*)?>)([\\s\\S]*?)</(?:[\\w-]+:)?${name}>`, "i").exec(xml)
+    if (match) return { name, tag: match[1], content: match[2] }
+  }
+  return undefined
 }
 
 /** The content of the first element with one of these names (any namespace prefix). */
 function element(xml: string, ...names: string[]) {
-  for (const name of names) {
-    const match = new RegExp(`<(?:[\\w-]+:)?${name}(?:\\s[^>]*)?>([\\s\\S]*?)</(?:[\\w-]+:)?${name}>`, "i").exec(xml)
-    if (match) return match[1]
-  }
-  return undefined
+  return find(xml, ...names)?.content
+}
+
+/** An item's summary. Atom `summary` and `content` are plain text unless their `type` says otherwise; the rest is HTML. */
+function summaryOf(block: string) {
+  const found = find(block, "description", "summary", "content", "encoded")
+  if (!found) return undefined
+  const type = attribute(found.tag, "type")?.toLowerCase() ?? "text"
+  if ((found.name === "summary" || found.name === "content") && type === "text") return summarize(text(found.content))
+  return plain(text(found.content))
 }
 
 function attribute(tag: string, name: string) {
@@ -117,7 +135,7 @@ export function parseFeed(xml: string) {
     const link = rssLink || atomLink(block)
     const key = text(element(block, "guid", "id")) || link || title
     const date = text(element(block, "pubDate", "published", "updated", "date"))
-    const summary = plain(text(element(block, "description", "summary", "content", "encoded")))
+    const summary = summaryOf(block)
     items.push({ key, title, ...(link ? { link } : {}), ...(date ? { date } : {}), ...(summary ? { summary } : {}) })
   }
   return { title: text(element(head, "title")) || undefined, items }
