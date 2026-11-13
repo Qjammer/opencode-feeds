@@ -1,0 +1,15 @@
+{
+  "name": "opencode-feeds",
+  "version": "1.0.0",
+  "description": "RSS and Atom subscriptions for OpenCode sessions",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node test.ts"
+  }
+}
