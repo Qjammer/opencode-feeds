@@ -3,7 +3,7 @@ import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import plugin, { parseCategories, parseEvery, parseFeed, wanted } from "./index.ts"
+import plugin, { parseCategories, parseDuration, parseEvery, parseFeed, wanted } from "./index.ts"
 
 // Parsing
 const rss = `<?xml version="1.0"?><rss version="2.0"><channel><title>Example &amp; Co</title><link>https://example.com</link>
@@ -45,6 +45,8 @@ assert.equal(parseEvery("30m"), 30 * 60_000)
 assert.equal(parseEvery("1d2h"), 26 * 3600_000)
 assert.throws(() => parseEvery("1m"))
 assert.throws(() => parseEvery("soon"))
+assert.equal(parseDuration("1m"), 60_000)
+assert.throws(() => parseDuration("0m"))
 
 assert.equal(wanted({}, { key: "a", title: "v1.0-beta", categories: [] }), true)
 assert.equal(wanted({ include: "^v1\\." }, { key: "a", title: "V1.0", categories: [] }), true)
@@ -287,6 +289,34 @@ globalThis.fetch = okFetch
 assert.equal(store.has(`feed:${removed.id}`), false)
 assert.equal((await call("feed_list", {}, "ses_ok6"))[0].title, "During")
 await call("feed_unsubscribe", { id: byCategory.id })
+
+// Expiry: listed, changed by feed_update, and once passed the subscription is removed with a note that doesn't wake.
+await assert.rejects(call("feed_subscribe", { url: "https://example.com/feed", expires: "soon" }, "ses_ok9"), /Invalid duration/)
+await assert.rejects(call("feed_subscribe", { url: "https://example.com/feed", expires: "0d" }, "ses_ok9"), /longer than 0/)
+const expiring = await call("feed_subscribe", { url: "https://example.com/feed", title: "PR 12", expires: "2d" }, "ses_ok9")
+const expiresAt = Date.parse(expiring.expiresAt)
+assert.ok(Math.abs(expiresAt - (Date.now() + 2 * 86_400_000)) < 5000)
+assert.ok(Math.abs(Date.parse((await call("feed_update", { id: expiring.id, expires: "1d" })).expiresAt) - (Date.now() + 86_400_000)) < 5000)
+assert.equal((await call("feed_update", { id: expiring.id, expires: "" })).expiresAt, undefined)
+assert.equal((await call("feed_list", {}, "ses_ok9"))[0].expiresAt, undefined)
+await call("feed_update", { id: expiring.id, expires: "1h" })
+await due()
+assert.ok(store.has(`feed:${expiring.id}`))
+const before = synthetic.length
+store.set(`feed:${expiring.id}`, { ...(store.get(`feed:${expiring.id}`) as any), expires: Date.now() - 1000 })
+body = body.replace("<item>", `<item><title>After expiry</title><guid>ae</guid></item><item>`)
+await due()
+assert.equal(store.has(`feed:${expiring.id}`), false)
+const notes = synthetic.slice(before).filter((input) => input.sessionID === "ses_ok9")
+assert.equal(notes.length, 1)
+assert.ok(notes[0].text.startsWith(`[Feed ${expiring.id}] Subscription to "Example & Co" (https://example.com/feed) expired`))
+assert.ok(notes[0].text.includes("Subscription title: PR 12"))
+assert.equal(notes[0].resume, false)
+assert.deepEqual(await call("feed_list", {}, "ses_ok9"), [])
+// An expired subscription of a deleted session is removed without a note.
+store.set("feed:feed_gone", { ...(store.get(`feed:${sub.id}`) as any), id: "feed_gone", sessionID: "ses_gone", expires: Date.now() - 1000 })
+await due()
+assert.equal(store.has("feed:feed_gone"), false)
 
 await call("feed_unsubscribe", { id: sub.id })
 assert.equal(store.size, 0)

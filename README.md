@@ -8,9 +8,9 @@ watch release feeds, security advisories or anything else that publishes a feed.
 
 | Tool | What it does |
 | ---- | ------------ |
-| `feed_subscribe` | Subscribes the current session to a feed: `url` (http, https or file URL, or the path of a local file: absolute or under `~/`), `every` (default `30m`, at least `5m`; e.g. `15m`, `2h`, `1d`), optional `title` shown with each delivery, and optional `include` / `exclude` and `categories` filters |
-| `feed_list` | Lists the session's subscriptions (or every session's, with `all`), with the next check and the last fetch error, if any |
-| `feed_update` | Changes a subscription's `every`, `title`, `include`, `exclude` or `categories` by its ID, keeping its seen items. Omitted fields are unchanged; an empty `title`, `include` or `exclude`, or an empty `categories` list, removes it |
+| `feed_subscribe` | Subscribes the current session to a feed: `url` (http, https or file URL, or the path of a local file: absolute or under `~/`), `every` (default `30m`, at least `5m`; e.g. `15m`, `2h`, `1d`), optional `title` shown with each delivery, optional `include` / `exclude` and `categories` filters, and an optional `expires` |
+| `feed_list` | Lists the session's subscriptions (or every session's, with `all`), with the next check, the expiry and the last fetch error, if any |
+| `feed_update` | Changes a subscription's `every`, `title`, `include`, `exclude`, `categories` or `expires` by its ID, keeping its seen items. Omitted fields are unchanged; an empty `title`, `include`, `exclude` or `expires`, or an empty `categories` list, removes it |
 | `feed_unsubscribe` | Removes a subscription by its ID (`feed_...`) |
 
 - Subscribing marks the feed's current items as seen, so only items published afterwards are delivered.
@@ -21,6 +21,10 @@ watch release feeds, security advisories or anything else that publishes a feed.
   all of the clause's terms and none of those written with a leading `!`. For example,
   `[["comment", "!own"], ["commit"]]` delivers comments that aren't your own, and commits; `[["!own"]]` delivers
   everything that isn't. Every filter must pass, and each delivered item shows its categories.
+- `expires` removes the subscription after a while: a duration from now, like `every` (e.g. `3d`, `12h`), also
+  counted from now when set by `feed_update`. Useful for feeds that stop mattering, such as a pull request's. Once it
+  has passed, the subscription is removed within a minute, and its session gets a note that it expired, without
+  being woken up. Without `expires`, a subscription lasts until it is removed or its session is deleted.
 - Feeds are fetched with conditional requests (`ETag`, `Last-Modified`). A failed fetch is recorded and shown by
   `feed_list` until a later fetch succeeds.
 - Local feed files are read with the OpenCode server's permissions, and read again only when their modification time
