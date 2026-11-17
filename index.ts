@@ -8,6 +8,8 @@
 // A subscription may filter items by title with `include` and `exclude` regular expressions, and by category with
 // `categories`, a disjunction of conjunctions of category terms; filtered-out items are marked as seen without being
 // delivered.
+// A subscription with `expires` is removed once that time has passed, and its session gets a note about it without
+// being woken up.
 // Local feed files (file URLs, absolute paths or paths under ~/) are read again only when their modification time
 // changes. A missing file is an empty feed, so a feed subscribed to before its file exists delivers everything in it.
 // Subscriptions are kept in plugin storage and survive restarts. Each delivery has a deterministic message ID, so
@@ -44,6 +46,8 @@ interface Feed {
   exclude?: string
   /** Only items matching one of these clauses are delivered: all of its terms, none of its `!` terms. */
   categories?: string[][]
+  /** When the subscription is removed, in epoch milliseconds. */
+  expires?: number
   next: number
   seen: string[]
   etag?: string
@@ -162,11 +166,17 @@ export function parseFeed(xml: string) {
 
 const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 }
 
-export function parseEvery(value: string) {
+export function parseDuration(value: string) {
   const compact = value.replace(/\s+/g, "")
-  if (!/^(\d+[mhd])+$/.test(compact)) throw new Error(`Invalid interval "${value}": use e.g. "30m", "2h" or "1d".`)
+  if (!/^(\d+[mhd])+$/.test(compact)) throw new Error(`Invalid duration "${value}": use e.g. "30m", "2h" or "1d".`)
   let ms = 0
   for (const [, amount, unit] of compact.matchAll(/(\d+)([mhd])/g)) ms += Number(amount) * UNITS[unit]
+  if (ms === 0) throw new Error(`Invalid duration "${value}": it must be longer than 0.`)
+  return ms
+}
+
+export function parseEvery(value: string) {
+  const ms = parseDuration(value)
   if (ms < MIN_EVERY_MS) throw new Error(`The interval must be at least ${MIN_EVERY_MS / 60_000}m.`)
   return ms
 }
@@ -292,6 +302,7 @@ function describe(feed: Feed) {
     ...(feed.exclude ? { exclude: feed.exclude } : {}),
     ...(feed.categories ? { categories: feed.categories } : {}),
     nextCheck: new Date(feed.next).toISOString(),
+    ...(feed.expires ? { expiresAt: new Date(feed.expires).toISOString() } : {}),
     ...(feed.error ? { error: feed.error } : {}),
   }
 }
@@ -373,6 +384,33 @@ async function poll(ctx: any, feed: Feed, now: number) {
   await save(ctx, feed.id, changes, now)
 }
 
+/** Removes an expired subscription and tells its session, without waking it up. */
+async function expire(ctx: any, id: string, now: number) {
+  const feed = (await ctx.storage.get(key(id))) as Feed | undefined
+  if (!feed?.expires || feed.expires > now) return
+  const name = feed.feedTitle ? `"${feed.feedTitle}"` : feed.url
+  const lines = [`[Feed ${feed.id}] Subscription to ${name} (${feed.url}) expired`, ""]
+  if (feed.title) lines.push(`Subscription title: ${feed.title}`, "")
+  lines.push("It is no longer checked. feed_subscribe again to keep following it.")
+  try {
+    await ctx.session.synthetic({
+      sessionID: feed.sessionID,
+      id: `msg_${createHash("sha256").update(`feeds\0${feed.id}\0expired`).digest("hex").slice(0, 32)}`,
+      text: lines.join("\n"),
+      description: `Feed expired: ${(feed.title ?? feed.feedTitle ?? feed.url).slice(0, 50)}`,
+      delivery: "steer",
+      metadata: { feeds: { id: feed.id, expired: true } },
+      resume: false,
+    })
+  } catch (error) {
+    if (await sessionExists(ctx, feed.sessionID)) {
+      console.error("[feeds] expiry notice failed, retrying", feed.id, error)
+      return
+    }
+  }
+  await ctx.storage.remove(key(feed.id))
+}
+
 async function tick() {
   if (shared.ticking || shared.ctxs.size === 0) return
   shared.ticking = true
@@ -380,7 +418,8 @@ async function tick() {
     const ctx = live()
     const now = Date.now()
     for (const feed of await all(ctx)) {
-      if (feed.next <= now) await poll(ctx, feed, now)
+      if (feed.expires && feed.expires <= now) await expire(ctx, feed.id, now)
+      else if (feed.next <= now) await poll(ctx, feed, now)
     }
   } catch (error) {
     console.error("[feeds] tick failed", error)
@@ -402,6 +441,10 @@ const SETTINGS = {
     items: { type: "array", items: { type: "string" } },
     description: "Only deliver items that match at least one clause. An item matches a clause when it has all of the clause's terms, and none of its terms written with a leading `!`. Terms are exact and case-sensitive.",
   },
+  expires: {
+    type: "string",
+    description: "Remove the subscription after this long from now, e.g. \"3d\" or \"12h\". The session then gets a note that it expired, without being woken up. Default: never.",
+  },
 }
 
 export default {
@@ -411,7 +454,7 @@ export default {
       editor.add({
         name: "feed_subscribe",
         description:
-          "Subscribe this session to an RSS or Atom feed. The feed is checked every `every` (default 30m, at least 5m); items published after subscribing are delivered as one message per check that wakes the session up, even if it is idle. Items already in the feed are not delivered; the result lists the latest few that pass the filters. `title` is shown with each delivery. `include` and `exclude` are case-insensitive regular expressions matched against item titles, e.g. exclude `nightly|beta|rc` to skip pre-releases. `categories` filters by the items' category terms, e.g. [[\"comment\", \"!own\"], [\"commit\"]] for comments that aren't your own, and commits. Subscriptions survive restarts.",
+          "Subscribe this session to an RSS or Atom feed. The feed is checked every `every` (default 30m, at least 5m); items published after subscribing are delivered as one message per check that wakes the session up, even if it is idle. Items already in the feed are not delivered; the result lists the latest few that pass the filters. `title` is shown with each delivery. `include` and `exclude` are case-insensitive regular expressions matched against item titles, e.g. exclude `nightly|beta|rc` to skip pre-releases. `categories` filters by the items' category terms, e.g. [[\"comment\", \"!own\"], [\"commit\"]] for comments that aren't your own, and commits. `expires` removes the subscription after a while, e.g. \"3d\" for a pull request's feed. Subscriptions survive restarts.",
         input: {
           type: "object",
           properties: {
@@ -434,6 +477,7 @@ export default {
           if (include) parsePattern("include", include)
           if (exclude) parsePattern("exclude", exclude)
           const categories = parseCategories(input.categories)
+          const lifetime = input.expires?.trim() ? parseDuration(input.expires) : undefined
           const sessionID = context.sessionID
           const existing = (await all(ctx)).filter((feed) => feed.sessionID === sessionID)
           const duplicate = existing.find((feed) => feed.url === url)
@@ -454,6 +498,7 @@ export default {
             ...(include ? { include } : {}),
             ...(exclude ? { exclude } : {}),
             ...(categories ? { categories } : {}),
+            ...(lifetime ? { expires: now + lifetime } : {}),
             next: now + interval,
             seen: remember(result.items, []),
             ...(result.etag ? { etag: result.etag } : {}),
@@ -475,7 +520,7 @@ export default {
       })
       editor.add({
         name: "feed_list",
-        description: "List the feeds this session (or every session with `all`) is subscribed to, with the next check and the last fetch error, if any.",
+        description: "List the feeds this session (or every session with `all`) is subscribed to, with the next check, the expiry and the last fetch error, if any.",
         input: {
           type: "object",
           properties: { all: { type: "boolean", description: "Every session's feeds, not just this one's." } },
@@ -492,7 +537,7 @@ export default {
       editor.add({
         name: "feed_update",
         description:
-          "Change a feed subscription's `every`, `title`, `include`, `exclude` or `categories` (see feed_subscribe), keeping track of the items already seen, so none are skipped or delivered twice. Omitted fields are unchanged; an empty `title`, `include` or `exclude`, or an empty `categories` list, removes it. The changes apply from the next check, which a new `every` reschedules to one interval from now.",
+          "Change a feed subscription's `every`, `title`, `include`, `exclude`, `categories` or `expires` (see feed_subscribe), keeping track of the items already seen, so none are skipped or delivered twice. Omitted fields are unchanged; an empty `title`, `include`, `exclude` or `expires`, or an empty `categories` list, removes it. A new `expires` counts from now. The changes apply from the next check, which a new `every` reschedules to one interval from now.",
         input: {
           type: "object",
           properties: { id: { type: "string", description: "The subscription's ID (feed_...)." }, ...SETTINGS },
@@ -512,9 +557,10 @@ export default {
           if (input.include !== undefined) updated.include = input.include.trim() || undefined
           if (input.exclude !== undefined) updated.exclude = input.exclude.trim() || undefined
           if (input.categories !== undefined) updated.categories = parseCategories(input.categories)
+          if (input.expires !== undefined) updated.expires = input.expires.trim() ? Date.now() + parseDuration(input.expires) : undefined
           if (updated.include) parsePattern("include", updated.include)
           if (updated.exclude) parsePattern("exclude", updated.exclude)
-          for (const field of ["title", "include", "exclude", "categories"] as const) {
+          for (const field of ["title", "include", "exclude", "categories", "expires"] as const) {
             if (updated[field] === undefined) delete updated[field]
           }
           await ctx.storage.set(key(feed.id), updated)
